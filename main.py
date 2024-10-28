@@ -76,33 +76,59 @@ class DelayedMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, input_size = x.size()
+        assert len(x.shape) == 3, f"Expected input x to have 3 dimensions, got {x.shape}"
         self.buffer = torch.zeros((batch_size, input_size), device=x.device)
         outputs = []
 
         for t in range(seq_len):
             current_input = x[:, t, :]
+            assert current_input.shape == (
+                batch_size, input_size), f"Expected current_input shape to be {(batch_size, input_size)}, got {current_input.shape}"
+
             decay_weights = self.sigmoid(self.delay_gate(current_input))
+            assert decay_weights.shape == (
+                batch_size, input_size), f"Expected decay_weights shape to be {(batch_size, input_size)}, got {decay_weights.shape}"
 
             immediate_contribution = current_input * decay_weights
+            assert immediate_contribution.shape == (
+                batch_size, input_size), f"Expected immediate_contribution shape to be {(batch_size, input_size)}, got {immediate_contribution.shape}"
+
             delayed_contribution = (1 - decay_weights) * current_input
+            assert delayed_contribution.shape == (
+                batch_size, input_size), f"Expected delayed_contribution shape to be {(batch_size, input_size)}, got {delayed_contribution.shape}"
             self.buffer += delayed_contribution
 
             buffer_decay_weights = self.sigmoid(self.delay_gate(self.buffer))
+            assert buffer_decay_weights.shape == (
+                batch_size, input_size), f"Expected buffer_decay_weights shape to be {(batch_size, input_size)}, got {buffer_decay_weights.shape}"
+
             buffer_release = self.buffer * buffer_decay_weights
+            assert buffer_release.shape == (
+                batch_size, input_size), f"Expected buffer_release shape to be {(batch_size, input_size)}, got {buffer_release.shape}"
+
             self.buffer = self.buffer * (1 - buffer_decay_weights)
+            assert self.buffer.shape == (
+                batch_size, input_size), f"Expected buffer shape to be {(batch_size, input_size)}, got {self.buffer.shape}"
 
             combined_input = immediate_contribution + buffer_release
+            assert combined_input.shape == (
+                batch_size, input_size), f"Expected combined_input shape to be {(batch_size, input_size)}, got {combined_input.shape}"
+
             output = self.mlp(combined_input)
+            assert output.shape == (batch_size, output.size(-1)
+                                    ), f"Expected output shape to be {(batch_size, output.size(-1))}, got {output.shape}"
             outputs.append(output)
 
-            # Log L2 norm of buffer and decay weights mean to wandb at each timestep
             wandb.log({
                 "timestep": t,
                 "buffer_l2_norm": torch.norm(self.buffer, p=2).item(),
                 "decay_weight_mean": decay_weights.mean().item(),
             })
 
-        return torch.stack(outputs, dim=1)
+        final_output = torch.stack(outputs, dim=1)
+        assert final_output.shape == (batch_size, seq_len, output.size(
+            -1)), f"Expected final output shape to be {(batch_size, seq_len, output.size(-1))}, got {final_output.shape}"
+        return final_output
 
 
 def train_model(model: nn.Module, data_loader: torch.utils.data.DataLoader,
