@@ -62,11 +62,17 @@ def discretize_waveforms(waveforms: np.ndarray, num_bins: int) -> np.ndarray:
 class DelayedMLP(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int):
         super(DelayedMLP, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, output_size)
         self.delay_gate = nn.Linear(input_size, input_size)
         self.sigmoid = nn.Sigmoid()
         self.buffer = None
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, output_size)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, input_size = x.size()
@@ -79,12 +85,22 @@ class DelayedMLP(nn.Module):
 
             immediate_contribution = current_input * decay_weights
             delayed_contribution = (1 - decay_weights) * current_input
-            self.buffer = self.buffer * decay_weights + delayed_contribution
+            self.buffer += delayed_contribution
 
-            combined_input = immediate_contribution + self.buffer
-            hidden = torch.relu(self.fc1(combined_input))
-            output = self.fc2(hidden)
+            buffer_decay_weights = self.sigmoid(self.delay_gate(self.buffer))
+            buffer_release = self.buffer * buffer_decay_weights
+            self.buffer = self.buffer * (1 - buffer_decay_weights)
+
+            combined_input = immediate_contribution + buffer_release
+            output = self.mlp(combined_input)
             outputs.append(output)
+
+            # Log L2 norm of buffer and decay weights mean to wandb at each timestep
+            wandb.log({
+                "timestep": t,
+                "buffer_l2_norm": torch.norm(self.buffer, p=2).item(),
+                "decay_weight_mean": decay_weights.mean().item(),
+            })
 
         return torch.stack(outputs, dim=1)
 
