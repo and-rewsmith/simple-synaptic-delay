@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 
 
 # Constants
-NUM_SEQUENCES = 3
+NUM_SEQUENCES = 5
 SEQUENCE_LENGTH = 200
-NUM_MODES = 2
+NUM_MODES = 4
 FREQ_RANGE = (1.5, 10.5)
 AMP_RANGE = (0.5, 1.5)
 PHASE_RANGE = (0, 2 * np.pi)
@@ -18,8 +18,8 @@ NUM_BINS = 25
 HIDDEN_SIZE = 64
 OUTPUT_SIZE = NUM_BINS
 BATCH_SIZE = NUM_SEQUENCES
-LEARNING_RATE = 5e-2
-NUM_EPOCHS = 600
+LEARNING_RATE = 1e-2
+NUM_EPOCHS = 250
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -66,18 +66,35 @@ class DelayedMLP(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int):
         super(DelayedMLP, self).__init__()
         self.input_size = input_size
+        self.output_size = output_size
+
+        self.mlp = nn.Sequential(
+            DelayedLinear(input_size, hidden_size),
+            DelayedLinear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, output_size),
+        )
+
+    def init_buffer(self, batch_size: int):
+        for module in self.mlp:
+            if isinstance(module, DelayedLinear):
+                module.init_buffer(batch_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
+
+class DelayedLinear(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int):
+        super(DelayedLinear, self).__init__()
+        self.input_size = input_size
         self.delay_gate_input = nn.Linear(input_size, input_size)
         self.delay_gate_buffer = nn.Linear(input_size, input_size)
         self.sigmoid = nn.Sigmoid()
 
-        self.mlp = nn.Sequential(
+        self.linear = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ReLU(),
             nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, output_size)
         )
 
     def init_buffer(self, batch_size: int):
@@ -110,7 +127,7 @@ class DelayedMLP(nn.Module):
 
             # combine the immediate and delayed contributions and feed through MLP
             combined_input = immediate_contribution + buffer_release
-            output = self.mlp(combined_input)
+            output = self.linear(combined_input)
             outputs.append(output)
 
         final_output = torch.stack(outputs, dim=1)
@@ -187,6 +204,8 @@ def inference_and_plot(model, inputs):
 
 
 def main():
+    print("Running on:", DEVICE)
+
     initialize_wandb()
 
     continuous_waveforms = generate_waveforms(NUM_SEQUENCES, SEQUENCE_LENGTH, NUM_MODES,
