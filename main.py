@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import wandb
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
 
 # Constants
 NUM_SEQUENCES = 1
@@ -15,7 +18,7 @@ NUM_BINS = 25
 HIDDEN_SIZE = 64
 OUTPUT_SIZE = NUM_BINS
 BATCH_SIZE = 32
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-2
 NUM_EPOCHS = 50
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,6 +154,41 @@ def train_model(model: nn.Module, data_loader: torch.utils.data.DataLoader,
         print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
 
+def inference_and_plot(model, inputs):
+    model.eval()
+    with torch.no_grad():
+        predictions = []
+        teacher_forcing = True
+
+        for t in range(inputs.size(1)):
+            if t == inputs.size(1) // 2:
+                teacher_forcing = False
+
+            if teacher_forcing:
+                current_input = inputs[:, t, :]
+            else:
+                current_input = predictions[-1]
+
+            output = model(current_input.unsqueeze(1))
+            predictions.append(output.squeeze(1))
+
+        predictions = torch.stack(predictions, dim=1)
+        original_data = inputs[0].cpu().numpy()
+        predicted_data = predictions[0].argmax(dim=-1).cpu().numpy()
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, len(original_data)), original_data.argmax(axis=-1)[1:], label="Original Data", color="blue")
+
+    # Shift predictions back by one timestep on the x-axis
+    plt.plot(range(len(predicted_data) - 1), predicted_data[:-1], 'o', label="Predicted Output", color="orange")
+
+    plt.xlabel("Timestep")
+    plt.ylabel("Bin Index")
+    plt.title("Inference: Teacher-Forced vs. Autoregressive Prediction")
+    plt.legend()
+    plt.show()
+
+
 def main():
     initialize_wandb()
 
@@ -159,7 +197,11 @@ def main():
     one_hot_waveforms = discretize_waveforms(continuous_waveforms, NUM_BINS)
 
     inputs = torch.tensor(one_hot_waveforms, dtype=torch.float32).to(DEVICE)
+
+    # Shift targets by one timestep for next-token prediction
     targets = torch.tensor(np.argmax(one_hot_waveforms, axis=-1), dtype=torch.long).to(DEVICE)
+    targets = targets[:, 1:]  # Shift to the next timestep for prediction
+    inputs = inputs[:, :-1]   # Remove last input timestep for alignment
 
     dataset = torch.utils.data.TensorDataset(inputs, targets)
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
@@ -169,6 +211,11 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     train_model(model, data_loader, optimizer, criterion, NUM_EPOCHS)
+
+    for inputs, _ in data_loader:
+        inputs = inputs.to(DEVICE)
+        inference_and_plot(model, inputs)
+        break
 
     wandb.finish()
 
