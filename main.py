@@ -18,8 +18,8 @@ NUM_BINS = 25
 HIDDEN_SIZE = 64
 OUTPUT_SIZE = NUM_BINS
 BATCH_SIZE = 32
-LEARNING_RATE = 1e-2
-NUM_EPOCHS = 50
+LEARNING_RATE = 9.9999e-2
+NUM_EPOCHS = 300
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -163,11 +163,25 @@ def inference_and_plot(model, inputs):
         for t in range(inputs.size(1)):
             if t == inputs.size(1) // 2:
                 teacher_forcing = False
+                print("\n*** Switching from teacher forcing to autoregressive prediction ***\n")
 
             if teacher_forcing:
                 current_input = inputs[:, t, :]
             else:
-                current_input = predictions[-1]
+                # Get the last prediction's probabilities
+                last_output = predictions[-1]
+                # Apply softmax to get probabilities
+                probabilities = torch.softmax(last_output, dim=-1)
+                # Use argmax for deterministic prediction
+                predicted_indices = probabilities.argmax(dim=-1)
+                # Create one-hot vector
+                current_input = torch.zeros_like(last_output)
+                current_input.scatter_(1, predicted_indices.unsqueeze(-1), 1)
+
+                # Log the shape and values after fixing
+                print(f"Time {t}: Predicted indices: {predicted_indices.cpu().numpy()}")
+                print(f"Time {t}: Current input (one-hot): {current_input[0].cpu().numpy()[:5]}...")
+                print(f"Time {t}: Shape of current input: {current_input.shape}")
 
             output = model(current_input.unsqueeze(1))
             predictions.append(output.squeeze(1))
@@ -177,11 +191,8 @@ def inference_and_plot(model, inputs):
         predicted_data = predictions[0].argmax(dim=-1).cpu().numpy()
 
     plt.figure(figsize=(12, 6))
-    plt.plot(range(1, len(original_data)), original_data.argmax(axis=-1)[1:], label="Original Data", color="blue")
-
-    # Shift predictions back by one timestep on the x-axis
-    plt.plot(range(len(predicted_data) - 1), predicted_data[:-1], 'o', label="Predicted Output", color="orange")
-
+    plt.plot(range(len(original_data)), original_data.argmax(axis=-1), label="Original Data", color="blue")
+    plt.plot(range(len(predicted_data)), predicted_data, 'o', label="Predicted Output", color="orange")
     plt.xlabel("Timestep")
     plt.ylabel("Bin Index")
     plt.title("Inference: Teacher-Forced vs. Autoregressive Prediction")
