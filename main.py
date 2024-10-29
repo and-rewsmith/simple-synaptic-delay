@@ -97,7 +97,10 @@ class DelayedMLP(nn.Module):
             delayed_contribution = (1 - decay_weights) * current_input
 
             # add delayed portion to buffer
-            # notably, this happens before the buffer release
+            #
+            # notably, this happens before the buffer release so some input can
+            # be delayed, interact with buffer, and be released, all in the same
+            # timestep
             self.buffer = self.buffer + delayed_contribution
 
             # determine how much of the buffer to release
