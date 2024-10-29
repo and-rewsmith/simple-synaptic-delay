@@ -10,16 +10,16 @@ import matplotlib.pyplot as plt
 # Constants
 NUM_SEQUENCES = 1
 SEQUENCE_LENGTH = 200
-NUM_MODES = 1
+NUM_MODES = 2
 FREQ_RANGE = (1.5, 10.5)
 AMP_RANGE = (0.5, 1.5)
 PHASE_RANGE = (0, 2 * np.pi)
 NUM_BINS = 25
 HIDDEN_SIZE = 64
 OUTPUT_SIZE = NUM_BINS
-BATCH_SIZE = 32
-LEARNING_RATE = 9.9999e-2
-NUM_EPOCHS = 300
+BATCH_SIZE = NUM_SEQUENCES
+LEARNING_RATE = 5e-2
+NUM_EPOCHS = 200
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -65,72 +65,52 @@ def discretize_waveforms(waveforms: np.ndarray, num_bins: int) -> np.ndarray:
 class DelayedMLP(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int):
         super(DelayedMLP, self).__init__()
-        self.delay_gate = nn.Linear(input_size, input_size)
+        self.input_size = input_size
+        self.delay_gate_input = nn.Linear(input_size, input_size)
+        self.delay_gate_buffer = nn.Linear(input_size, input_size)
         self.sigmoid = nn.Sigmoid()
-        self.buffer = None
 
         self.mlp = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ReLU(),
+            nn.LayerNorm(hidden_size),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
+            nn.LayerNorm(hidden_size),
             nn.Linear(hidden_size, output_size)
         )
 
+    def init_buffer(self, batch_size: int):
+        self.buffer = torch.zeros(batch_size, self.input_size).to(DEVICE)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, input_size = x.size()
-        assert len(x.shape) == 3, f"Expected input x to have 3 dimensions, got {x.shape}"
-        self.buffer = torch.zeros((batch_size, input_size), device=x.device)
+        # Use a local variable for the buffer
         outputs = []
 
         for t in range(seq_len):
             current_input = x[:, t, :]
-            assert current_input.shape == (
-                batch_size, input_size), f"Expected current_input shape to be {(batch_size, input_size)}, got {current_input.shape}"
 
-            decay_weights = self.sigmoid(self.delay_gate(current_input))
-            assert decay_weights.shape == (
-                batch_size, input_size), f"Expected decay_weights shape to be {(batch_size, input_size)}, got {decay_weights.shape}"
-
+            # compute what of the current input is getting delayed
+            decay_weights = self.sigmoid(self.delay_gate_input(current_input))
             immediate_contribution = current_input * decay_weights
-            assert immediate_contribution.shape == (
-                batch_size, input_size), f"Expected immediate_contribution shape to be {(batch_size, input_size)}, got {immediate_contribution.shape}"
-
             delayed_contribution = (1 - decay_weights) * current_input
-            assert delayed_contribution.shape == (
-                batch_size, input_size), f"Expected delayed_contribution shape to be {(batch_size, input_size)}, got {delayed_contribution.shape}"
-            self.buffer += delayed_contribution
 
-            buffer_decay_weights = self.sigmoid(self.delay_gate(self.buffer))
-            assert buffer_decay_weights.shape == (
-                batch_size, input_size), f"Expected buffer_decay_weights shape to be {(batch_size, input_size)}, got {buffer_decay_weights.shape}"
+            # add delayed portion to buffer
+            # notably, this happens before the buffer release
+            self.buffer = self.buffer + delayed_contribution
 
+            # determine how much of the buffer to release
+            buffer_decay_weights = self.sigmoid(self.delay_gate_buffer(self.buffer))
             buffer_release = self.buffer * buffer_decay_weights
-            assert buffer_release.shape == (
-                batch_size, input_size), f"Expected buffer_release shape to be {(batch_size, input_size)}, got {buffer_release.shape}"
-
             self.buffer = self.buffer * (1 - buffer_decay_weights)
-            assert self.buffer.shape == (
-                batch_size, input_size), f"Expected buffer shape to be {(batch_size, input_size)}, got {self.buffer.shape}"
 
+            # combine the immediate and delayed contributions and feed through MLP
             combined_input = immediate_contribution + buffer_release
-            assert combined_input.shape == (
-                batch_size, input_size), f"Expected combined_input shape to be {(batch_size, input_size)}, got {combined_input.shape}"
-
             output = self.mlp(combined_input)
-            assert output.shape == (batch_size, output.size(-1)
-                                    ), f"Expected output shape to be {(batch_size, output.size(-1))}, got {output.shape}"
             outputs.append(output)
 
-            wandb.log({
-                "timestep": t,
-                "buffer_l2_norm": torch.norm(self.buffer, p=2).item(),
-                "decay_weight_mean": decay_weights.mean().item(),
-            })
-
         final_output = torch.stack(outputs, dim=1)
-        assert final_output.shape == (batch_size, seq_len, output.size(
-            -1)), f"Expected final output shape to be {(batch_size, seq_len, output.size(-1))}, got {final_output.shape}"
         return final_output
 
 
@@ -140,6 +120,7 @@ def train_model(model: nn.Module, data_loader: torch.utils.data.DataLoader,
     for epoch in range(num_epochs):
         total_loss = 0.0
         for inputs, targets in data_loader:
+            model.init_buffer(BATCH_SIZE)
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
             optimizer.zero_grad()
             outputs = model(inputs)
@@ -155,6 +136,7 @@ def train_model(model: nn.Module, data_loader: torch.utils.data.DataLoader,
 
 
 def inference_and_plot(model, inputs):
+    model.init_buffer(inputs.size(0))
     model.eval()
     with torch.no_grad():
         predictions = []
@@ -193,6 +175,7 @@ def inference_and_plot(model, inputs):
     plt.figure(figsize=(12, 6))
     plt.plot(range(len(original_data)), original_data.argmax(axis=-1), label="Original Data", color="blue")
     plt.plot(range(len(predicted_data)), predicted_data, 'o', label="Predicted Output", color="orange")
+    plt.axvline(x=inputs.size(1) // 2, color='grey', linestyle='--', label='Teacher Forcing Ends')
     plt.xlabel("Timestep")
     plt.ylabel("Bin Index")
     plt.title("Inference: Teacher-Forced vs. Autoregressive Prediction")
@@ -218,6 +201,7 @@ def main():
     data_loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
     model = DelayedMLP(input_size=NUM_BINS, hidden_size=HIDDEN_SIZE, output_size=OUTPUT_SIZE).to(DEVICE)
+    model.init_buffer(BATCH_SIZE)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
 
